@@ -1,0 +1,190 @@
+CODE: 
+ 
+#include <Adafruit_Sensor.h> 
+#include <DHT.h> 
+#include "MQ135.h" 
+ 
+ 
+const int LDR_PIN = A0; 
+const int LIGHT_PIN = 7; 
+const int TRIG_PIN = 9; 
+const int ECHO_PIN = 10; 
+ 
+// AC System 
+const int AC_PIN = 4; 
+const int DHT_PIN = 2; 
+#define DHTTYPE DHT11 
+ 
+// Air Quality System 
+const int AQ_LED_PIN = 5; 
+const int MQ135_PIN = A1; 
+ 
+// --- Sensor Objects --- 
+DHT dht(DHT_PIN, DHTTYPE); 
+MQ135 mq135_sensor = MQ135(MQ135_PIN); 
+ 
+// --- Thresholds (CALIBRATE THESE) --- 
+int LDR_THRESHOLD = 900;     
+ 
+int MOTION_DISTANCE_CM = 28; 
+int PPM_THRESHOLD = 300; // AQI (PPM) threshold for alert 
+ 
+// --- Light System Variables --- 
+const long MOTION_TIMEOUT = 1000; 
+unsigned long lastMotionTime = 0; 
+bool lightIsOn = false; 
+long previousDistance = -1; 
+ 
+ 
+bool acIsOn = false; 
+bool aqAlertIsOn = false; 
+ 
+unsigned long lastSerialPrint = 0; 
+const long SERIAL_PRINT_INTERVAL = 2000; // Print status every 2 seconds 
+ 
+void setup() { 
+  Serial.begin(9600); 
+  Serial.println("Smart Room Controller Booting Up..."); 
+ 
+  // Init Light System 
+  pinMode(LIGHT_PIN, OUTPUT); 
+  pinMode(TRIG_PIN, OUTPUT); 
+  pinMode(ECHO_PIN, INPUT); 
+  digitalWrite(LIGHT_PIN, LOW); 
+ 
+  // Init AC System 
+  pinMode(AC_PIN, OUTPUT); 
+  digitalWrite(AC_PIN, LOW); 
+  dht.begin(); 
+ 
+  // Init AQ System 
+  pinMode(AQ_LED_PIN, OUTPUT); 
+  digitalWrite(AQ_LED_PIN, LOW); 
+  
+  Serial.println("Waiting for sensors to stabilize..."); 
+  delay(1000); // Give sensors a second to boot 
+} 
+ 
+void loop() { 
+ 
+  unsigned long currentTime = millis(); 
+ 
+  // --- 1. READ ALL SENSORS --- 
+  int ldrValue = analogRead(LDR_PIN); 
+  long distance = getDistance(); 
+  float temp = dht.readTemperature(); 
+  float hum = dht.readHumidity();  
+ 
+  
+  bool isDark = (ldrValue < LDR_THRESHOLD); 
+  bool motionDetected = false; 
+ 
+  if ((distance > 0 && distance < MOTION_DISTANCE_CM)) { 
+    motionDetected = true; 
+  } 
+  previousDistance = distance; 
+ 
+  if (isDark && motionDetected) { 
+    if (!lightIsOn) { 
+      digitalWrite(LIGHT_PIN, HIGH); 
+      lightIsOn = true; 
+      Serial.println("EVENT: Motion variation detected, Light ON"); 
+    } 
+    lastMotionTime = currentTime; 
+  } 
+ 
+  if (lightIsOn && (currentTime - lastMotionTime > MOTION_TIMEOUT)) { 
+    digitalWrite(LIGHT_PIN, LOW); 
+    lightIsOn = false; 
+    Serial.println("EVENT: No motion timeout, Light OFF"); 
+  } 
+ 
+  if (!isDark && lightIsOn) { 
+    digitalWrite(LIGHT_PIN, LOW); 
+    lightIsOn = false; 
+    Serial.println("EVENT: It's bright, Light OFF"); 
+  } 
+ 
+  // --- 3. AC & AQI LOGIC --- 
+  
+ 
+   
+  if (isnan(temp) || isnan(hum)) { 
+    Serial.println("Failed to read from DHT sensor!"); 
+  } 
+ else { 
+    if (temp > 26) { 
+      if (!acIsOn) { 
+        digitalWrite(AC_PIN, HIGH); 
+        acIsOn = true; 
+        Serial.println("EVENT: Temp > 26 C. AC turned ON"); 
+      } 
+    } else if (temp < 20) { 
+      if (acIsOn) { 
+        digitalWrite(AC_PIN, LOW); 
+        acIsOn = false; 
+        Serial.println("EVENT: Temp < 20 C. AC turned OFF"); 
+      } 
+    } 
+ 
+    // --- AIR QUALITY LOGIC (uses temp & humidity) --- 
+     
+    float ppm = mq135_sensor.getCorrectedPPM(temp, hum); 
+ 
+    if (ppm > PPM_THRESHOLD) { 
+      if (!aqAlertIsOn) { 
+        digitalWrite(AQ_LED_PIN, HIGH); 
+        aqAlertIsOn = true; 
+        Serial.print("EVENT: Air Quality Alert! PPM = "); 
+        Serial.println(ppm); 
+      } 
+    } else { 
+      if (aqAlertIsOn) { 
+        digitalWrite(AQ_LED_PIN, LOW); 
+        aqAlertIsOn = false; 
+        Serial.print("EVENT: Air Quality OK. PPM = "); 
+        Serial.println(ppm); 
+      } 
+    } 
+  } 
+ 
+ 
+  // --- 4. PERIODIC SERIAL MONITOR STATUS --- 
+  if (currentTime - lastSerialPrint > SERIAL_PRINT_INTERVAL) { 
+    lastSerialPrint = currentTime; 
+    
+    Serial.println("--------------------"); 
+    Serial.print("LDR: "); 
+    Serial.print(ldrValue); 
+    Serial.print(" | Dist: "); 
+    Serial.print(distance); 
+    Serial.print(" cm | Temp: "); 
+    Serial.print(temp); 
+    Serial.print(" C | Hum: "); 
+    Serial.print(hum); 
+    Serial.print(" %"); 
+    
+    float ppm = mq135_sensor.getCorrectedPPM(temp, hum); 
+    Serial.print(" | AQI (PPM): "); 
+    Serial.println(ppm); 
+    
+    Serial.print("States - Light: "); 
+    Serial.print(lightIsOn ? "ON" : "OFF"); 
+    Serial.print(" | AC: "); 
+    Serial.print(acIsOn ? "ON" : "OFF"); 
+    Serial.print(" | AQ Alert: "); 
+    Serial.println(aqAlertIsOn ? "ON" : "OFF"); 
+  } 
+} 
+ 
+ 
+long getDistance() { 
+  digitalWrite(TRIG_PIN, LOW); 
+  delayMicroseconds(2); 
+  digitalWrite(TRIG_PIN, HIGH); 
+  delayMicroseconds(10); 
+  digitalWrite(TRIG_PIN, LOW); 
+  long duration = pulseIn(ECHO_PIN, HIGH); 
+  long distance = (duration * 0.034) / 2; 
+  return distance; 
+}
